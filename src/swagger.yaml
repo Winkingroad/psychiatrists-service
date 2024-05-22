@@ -1,0 +1,246 @@
+swagger: '2.0'
+info:
+  title: Psychiatrist Platform API
+  version: '1.0'
+  description: API documentation for the Psychiatrist Platform
+
+paths:
+  /api/patients:
+    get:
+      summary: Retrieve all patients
+      responses:
+        200:
+          description: List of patients
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Patient'
+    post:
+      summary: Register a new patient
+      parameters:
+        - in: body
+          name: body
+          description: Patient object
+          required: true
+          schema:
+            $ref: '#/definitions/Patient'
+      responses:
+        201:
+          description: Patient registered successfully
+        400:
+          description: Bad request
+
+  /api/patients/{id}:
+    get:
+      summary: Retrieve a patient by ID
+      parameters:
+        - in: path
+          name: id
+          description: Patient ID
+          required: true
+          type: integer
+          format: int64
+      responses:
+        200:
+          description: Patient details
+          schema:
+            $ref: '#/definitions/Patient'
+        404:
+          description: Patient not found
+
+    put:
+      summary: Update a patient by ID
+      parameters:
+        - in: path
+          name: id
+          description: Patient ID
+          required: true
+          type: integer
+          format: int64
+        - in: body
+          name: body
+          description: Updated patient object
+          required: true
+          schema:
+            $ref: '#/definitions/Patient'
+      responses:
+        200:
+          description: Patient updated successfully
+        404:
+          description: Patient not found
+
+    delete:
+      summary: Delete a patient by ID
+      parameters:
+        - in: path
+          name: id
+          description: Patient ID
+          required: true
+          type: integer
+          format: int64
+      responses:
+        200:
+          description: Patient deleted successfully
+        404:
+          description: Patient not found
+
+  /api/hospitals:
+    get:
+      summary: Retrieve all hospitals
+      responses:
+        200:
+          description: List of hospitals
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Hospital'
+
+  /api/hospitals/{id}:
+    get:
+      summary: Retrieve a hospital by ID
+      parameters:
+        - in: path
+          name: id
+          description: Hospital ID
+          required: true
+          type: integer
+          format: int64
+      responses:
+        200:
+          description: Hospital details
+          schema:
+            $ref: '#/definitions/Hospital'
+        404:
+          description: Hospital not found
+
+  /api/hospitals/details/{id}:
+    get:
+      summary: Retrieve detailed information about a hospital by ID
+      parameters:
+        - in: path
+          name: id
+          description: Hospital ID
+          required: true
+          type: integer
+          format: int64
+      responses:
+        200:
+          description: Detailed hospital information
+          schema:
+            $ref: '#/definitions/HospitalDetails'
+        404:
+          description: Hospital not found
+
+  /api/psychiatrists:
+    get:
+      summary: Retrieve all psychiatrists
+      responses:
+        200:
+          description: List of psychiatrists
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/Psychiatrist'
+
+  /api/psychiatrists/{id}:
+    get:
+      summary: Retrieve a psychiatrist by ID
+      parameters:
+        - in: path
+          name: id
+          description: Psychiatrist ID
+          required: true
+          type: integer
+          format: int64
+      responses:
+        200:
+          description: Psychiatrist details
+          schema:
+            $ref: '#/definitions/Psychiatrist'
+        404:
+          description: Psychiatrist not found
+
+definitions:
+  Patient:
+    type: object
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+      address:
+        type: string
+      email:
+        type: string
+      phone:
+        type: string
+      psychiatristId:
+        type: integer
+      photo:
+        type: string
+    required:
+      - name
+      - address
+      - email
+      - phone
+      - psychiatristId
+      - photo
+
+  Hospital:
+    type: object
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+      created_at:
+        type: string
+        format: date-time
+      updated_at:
+        type: string
+        format: date-time
+    required:
+      - name
+
+  HospitalDetails:
+    type: object
+    properties:
+      hospital_name:
+        type: string
+      total_psychiatrists:
+        type: integer
+      total_patients:
+        type: integer
+      psychiatrist_details:
+        type: array
+        items:
+          $ref: '#/definitions/PsychiatristDetail'
+
+  PsychiatristDetail:
+    type: object
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+      patientsCount:
+        type: integer
+
+  Psychiatrist:
+    type: object
+    properties:
+      id:
+        type: integer
+      name:
+        type: string
+      hospitalId:
+        type: integer
+      created_at:
+        type: string
+        format: date-time
+      updated_at:
+        type: string
+        format: date-time
+    required:
+      - name
+      - hospitalId

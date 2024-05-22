@@ -1,0 +1,374 @@
+{
+	"info": {
+		"_postman_id": "9315dc90-8ffe-4599-bd9f-31caec3ca43d",
+		"name": "psychiatrist-platform",
+		"description": "# Psychiatrist Platform\n\n## Description\nWelcome to the Psychiatrist Platform project! This platform provides APIs for managing patients, hospitals, and psychiatrists. Below are the details of libraries/frameworks used and API endpoints.\n\n## API Endpoints\n\n### Patients\n- GET /api/patients - Get all patients\n- GET /api/patients/:id - Get a patient by id\n- POST /api/patients/register - Register a patient\n- PUT /api/patients/:id - Update a patient by id\n- DELETE /api/patients/:id - Delete a patient by id\n\n### Hospitals\n- GET /api/hospitals - Get all hospitals\n- GET /api/hospitals/:id - Get a hospital by id\n- GET /api/hospitals/details/:id - Get a hospital details by id\n\n### Psychiatrists\n- GET /api/psychiatrists - Get all psychiatrists\n- GET /api/psychiatrists/:id - Get a psychiatrist by id\n\n## Swagger Documentation\n- Interactive API documentation is available via Swagger UI. You can access it at:\n    - http://localhost:3000/api-docs\n\n## Postman Collection\n- Postman collection is available in the `postman` folder\n\n## Database Dump and Database Schema\n- Database dump is available in the `database` folder\n- Database schema is available in the `database` folder\n\n#### hospitalModel\n- `hospitalId` : primary key\n- `hospitalName` : name of the hospital\n\n#### patientModel\n- `patientId` : primary key\n- `name` : name of the patient\n- `email` : email of the patient\n- `password` : password of the patient\n- `phone` : phone number of the patient\n- `address` : address of the patient\n- `psychiatristId` : foreign key\n- `photo` : photo of the patient\n\n#### psychiatristModel\n- `psychiatristId` : primary key\n- `name` : name of the psychiatrist\n- `hospitalId` : foreign key\n\n\n",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "30294283"
+	},
+	"item": [
+		{
+			"name": "Hospital End point",
+			"item": [
+				{
+					"name": "getallHospitals",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3000/api/hospitals",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"hospitals"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "gethospitalbyID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3000/api/hospitals/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"hospitals",
+								"1"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "getAllDetails",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3000/api/hospitals/details/1",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"hospitals",
+								"details",
+								"1"
+							]
+						}
+					},
+					"response": []
+				}
+			],
+			"description": "### Hospitals\n- GET /api/hospitals - Get all hospitals\n- GET /api/hospitals/:id - Get a hospital by id\n- GET /api/hospitals/details/:id - Get a hospital details by id"
+		},
+		{
+			"name": "Patients End point",
+			"item": [
+				{
+					"name": "allPatients",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3000 /api/patients",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000 ",
+							"path": [
+								"api",
+								"patients"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "patientById",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3000/api/patients/23",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"patients",
+								"23"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "registerPatient",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "multipart/form-data",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "name",
+									"value": "jackie",
+									"type": "text"
+								},
+								{
+									"key": "address",
+									"value": "123 Main Street, City, Country",
+									"type": "text"
+								},
+								{
+									"key": "email",
+									"value": "john.doe@example.com",
+									"type": "text"
+								},
+								{
+									"key": "phone",
+									"value": "+918423652938",
+									"type": "text"
+								},
+								{
+									"key": "password",
+									"value": "Luminious@123",
+									"type": "text"
+								},
+								{
+									"key": "psychiatristId",
+									"value": "3",
+									"type": "text"
+								},
+								{
+									"key": "photo",
+									"type": "file",
+									"src": "postman-cloud:///1ef183c6-d078-4b10-8e90-e1d8e5fb9b70"
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/patients/register",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"patients",
+								"register"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "updatePatient",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "multipart/form-data",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "name",
+									"value": "jackie",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "address",
+									"value": "123 Main Street, City, Country",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "email",
+									"value": "john.doe@example.com",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "phone",
+									"value": "+918423652938",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "password",
+									"value": "Luminious@123",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "psychiatristId",
+									"value": "4",
+									"type": "text"
+								},
+								{
+									"key": "photo",
+									"type": "file",
+									"src": [],
+									"disabled": true
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/patients/21",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"patients",
+								"21"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "deletePatient",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "multipart/form-data",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "name",
+									"value": "jackie",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "address",
+									"value": "123 Main Street, City, Country",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "email",
+									"value": "john.doe@example.com",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "phone_number",
+									"value": "+918423652938",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "password",
+									"value": "Yv1107@2001",
+									"type": "text",
+									"disabled": true
+								},
+								{
+									"key": "psychiatristId",
+									"value": "3",
+									"type": "text"
+								},
+								{
+									"key": "profile_picture",
+									"type": "file",
+									"src": [],
+									"disabled": true
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:3000/api/patients/101",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000",
+							"path": [
+								"api",
+								"patients",
+								"101"
+							]
+						}
+					},
+					"response": []
+				}
+			],
+			"description": "### Patients\n- GET /api/patients - Get all patients\n- GET /api/patients/:id - Get a patient by id\n- POST /api/patients/register - Register a patient\n- PUT /api/patients/:id - Update a patient by id\n- DELETE /api/patients/:id - Delete a patient by id\n"
+		},
+		{
+			"name": "Psychiatrists End points",
+			"item": [
+				{
+					"name": "allPsychiatrists",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3000 /api/psychiatrists",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "3000 ",
+							"path": [
+								"api",
+								"psychiatrists"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "psychiatristsById",
+					"request": {
+						"method": "GET",
+						"header": []
+					},
+					"response": []
+				}
+			],
+			"description": "### Psychiatrists\n- GET /api/psychiatrists - Get all psychiatrists\n- GET /api/psychiatrists/:id - Get a psychiatrist by id"
+		}
+	]
+}
