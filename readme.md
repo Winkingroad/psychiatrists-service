@@ -75,6 +75,7 @@ npm dev
 ## Swagger Documentation
 - Interactive API documentation is available via Swagger UI. You can access it at:
     - http://localhost:3000/api-docs
+    - https://app.swaggerhub.com/apis/YashSrivastava/psychiatrist-platform_api/1.0-oas3
 
 ## Postman Collection
 - Postman collection is available in the `psychiatrist-platform.postman_collection.json` file
