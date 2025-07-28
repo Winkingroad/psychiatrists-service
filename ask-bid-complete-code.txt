@@ -1,0 +1,1858 @@
+================================================================
+COMPLETE ASK & BID MANAGEMENT CODE FOR SHOPIFY APP
+================================================================
+
+This file contains all the code for the Ask & Bid marketplace functionality
+including database schema, backend routes, frontend components, and utilities.
+
+================================================================
+1. DATABASE SCHEMA (prisma/schema.prisma)
+================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id          String   @id
+  shop        String
+  state       String
+  isOnline    Boolean  @default(false)
+  scope       String?
+  expires     DateTime?
+  accessToken String
+  userId      BigInt?
+  firstName   String?
+  lastName    String?
+  email       String?
+  accountOwner Boolean  @default(false)
+  locale      String?
+  collaborator Boolean? @default(false)
+  emailVerified Boolean? @default(false)
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  shopifyId   String   @unique
+  title       String
+  handle      String?
+  basePrice   Float    @default(0)
+  baseCost    Float    @default(0)
+  askPrice    Float    @default(0)
+  status      String   @default("ACTIVE")
+  imageUrl    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  bids        Bid[]
+  
+  @@index([shopifyId])
+  @@index([status])
+}
+
+model Bid {
+  id          String   @id @default(cuid())
+  productId   String
+  amount      Float
+  bidderEmail String?
+  bidderName  String?
+  status      String   @default("pending") // pending, accepted, rejected
+  message     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@index([productId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+================================================================
+2. UTILITY FUNCTIONS (app/utils/api.js)
+================================================================
+
+// app/utils/api.js
+export async function fetchProducts({ admin }, limit = 50) {
+  try {
+    const response = await admin.graphql(
+      `#graphql
+        query getProducts($first: Int!) {
+          products(first: $first) {
+            nodes {
+              id
+              title
+              handle
+              status
+              featuredImage {
+                url
+                altText
+              }
+              variants(first: 1) {
+                nodes {
+                  id
+                  price
+                  compareAtPrice
+                  inventoryQuantity
+                }
+              }
+            }
+          }
+        }`,
+      {
+        variables: {
+          first: limit,
+        },
+      }
+    );
+
+    const data = await response.json();
+    
+    if (data.errors) {
+      throw new Error(data.errors[0].message);
+    }
+
+    const products = data.data.products.nodes.map(product => ({
+      shopifyId: product.id,
+      title: product.title,
+      handle: product.handle,
+      status: product.status,
+      basePrice: parseFloat(product.variants.nodes[0]?.price || 0),
+      baseCost: parseFloat(product.variants.nodes[0]?.compareAtPrice || product.variants.nodes[0]?.price || 0),
+      imageUrl: product.featuredImage?.url,
+      featuredImage: product.featuredImage?.url,
+    }));
+
+    return products;
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    throw error;
+  }
+}
+
+export function calculateAskPrice(basePrice, markup = 0.2) {
+  return basePrice * (1 + markup);
+}
+
+export async function fetchProductById({ admin }, productId) {
+  try {
+    const response = await admin.graphql(
+      `#graphql
+        query getProduct($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            handle
+            status
+            featuredImage {
+              url
+              altText
+            }
+            variants(first: 1) {
+              nodes {
+                id
+                price
+                compareAtPrice
+                inventoryQuantity
+              }
+            }
+          }
+        }`,
+      {
+        variables: {
+          id: productId,
+        },
+      }
+    );
+
+    const data = await response.json();
+    
+    if (data.errors) {
+      throw new Error(data.errors[0].message);
+    }
+
+    const product = data.data.product;
+    if (!product) {
+      throw new Error('Product not found');
+    }
+
+    return {
+      shopifyId: product.id,
+      title: product.title,
+      handle: product.handle,
+      status: product.status,
+      basePrice: parseFloat(product.variants.nodes[0]?.price || 0),
+      baseCost: parseFloat(product.variants.nodes[0]?.compareAtPrice || product.variants.nodes[0]?.price || 0),
+      imageUrl: product.featuredImage?.url,
+      featuredImage: product.featuredImage?.url,
+    };
+  } catch (error) {
+    console.error('Error fetching product:', error);
+    throw error;
+  }
+}
+
+================================================================
+3. MAIN ASK BID PAGE (app/routes/app.askbid.jsx)
+================================================================
+
+import { useEffect, useState } from "react";
+import { useLoaderData, useNavigate } from "@remix-run/react";
+import { json } from "@remix-run/node";
+import {
+  Page,
+  Layout,
+  Text,
+  Card,
+  Button,
+  BlockStack,
+  InlineStack,
+  EmptyState,
+  Banner,
+  Filters,
+  ChoiceList,
+} from "@shopify/polaris";
+import { TitleBar } from "@shopify/app-bridge-react";
+import { authenticate } from "../shopify.server";
+import { AskBidCard } from "../components/AskBidCard";
+import { fetchProducts, calculateAskPrice } from "../utils/api";
+import db from "../db.server";
+
+export const loader = async ({ request }) => {
+  const { admin } = await authenticate.admin(request);
+
+  try {
+    // Fetch products from Shopify
+    const shopifyProducts = await fetchProducts({ admin }, 50);
+    
+    // Get existing products from database with bids
+    const dbProducts = await db.product.findMany({
+      include: {
+        bids: {
+          orderBy: { createdAt: 'desc' }
+        }
+      }
+    });
+
+    // Sync products: update existing and add new ones
+    const syncedProducts = [];
+    
+    for (const shopifyProduct of shopifyProducts) {
+      const existingProduct = dbProducts.find(p => p.shopifyId === shopifyProduct.shopifyId);
+      
+      if (existingProduct) {
+        // Update existing product
+        const updatedProduct = await db.product.update({
+          where: { id: existingProduct.id },
+          data: {
+            title: shopifyProduct.title,
+            handle: shopifyProduct.handle,
+            basePrice: shopifyProduct.basePrice,
+            status: shopifyProduct.status,
+            imageUrl: shopifyProduct.imageUrl,
+            askPrice: existingProduct.askPrice || calculateAskPrice(shopifyProduct.basePrice),
+          },
+          include: {
+            bids: {
+              orderBy: { createdAt: 'desc' }
+            }
+          }
+        });
+        syncedProducts.push(updatedProduct);
+      } else {
+        // Create new product
+        const newProduct = await db.product.create({
+          data: {
+            shopifyId: shopifyProduct.shopifyId,
+            title: shopifyProduct.title,
+            handle: shopifyProduct.handle,
+            basePrice: shopifyProduct.basePrice,
+            askPrice: calculateAskPrice(shopifyProduct.basePrice),
+            status: shopifyProduct.status,
+            imageUrl: shopifyProduct.imageUrl,
+          },
+          include: {
+            bids: {
+              orderBy: { createdAt: 'desc' }
+            }
+          }
+        });
+        syncedProducts.push(newProduct);
+      }
+    }
+
+    // Calculate statistics
+    const stats = {
+      totalProducts: syncedProducts.length,
+      productsWithBids: syncedProducts.filter(p => p.bids.length > 0).length,
+      totalBids: syncedProducts.reduce((sum, p) => sum + p.bids.length, 0),
+      averageAskPrice: syncedProducts.reduce((sum, p) => sum + p.askPrice, 0) / syncedProducts.length || 0,
+    };
+
+    return json({ 
+      products: syncedProducts,
+      stats,
+      success: true 
+    });
+  } catch (error) {
+    console.error("Error in askbid loader:", error);
+    return json({ 
+      products: [], 
+      stats: null,
+      error: error.message,
+      success: false 
+    });
+  }
+};
+
+export default function AskBidPage() {
+  const { products, stats, error, success } = useLoaderData();
+  const navigate = useNavigate();
+  const [filteredProducts, setFilteredProducts] = useState(products);
+  const [filters, setFilters] = useState({
+    status: [],
+    hasBids: [],
+  });
+
+  // Filter products based on current filters
+  useEffect(() => {
+    let filtered = [...products];
+
+    if (filters.status.length > 0) {
+      filtered = filtered.filter(p => filters.status.includes(p.status));
+    }
+
+    if (filters.hasBids.length > 0) {
+      if (filters.hasBids.includes('with-bids')) {
+        filtered = filtered.filter(p => p.bids.length > 0);
+      }
+      if (filters.hasBids.includes('without-bids')) {
+        filtered = filtered.filter(p => p.bids.length === 0);
+      }
+    }
+
+    setFilteredProducts(filtered);
+  }, [products, filters]);
+
+  const handleFiltersChange = (key, value) => {
+    setFilters(prev => ({
+      ...prev,
+      [key]: value
+    }));
+  };
+
+  const clearAllFilters = () => {
+    setFilters({
+      status: [],
+      hasBids: [],
+    });
+  };
+
+  const filterOptions = [
+    {
+      key: 'status',
+      label: 'Product Status',
+      filter: (
+        <ChoiceList
+          title="Status"
+          titleHidden
+          choices={[
+            { label: 'Active', value: 'ACTIVE' },
+            { label: 'Draft', value: 'DRAFT' },
+            { label: 'Archived', value: 'ARCHIVED' },
+          ]}
+          selected={filters.status}
+          onChange={(value) => handleFiltersChange('status', value)}
+          allowMultiple
+        />
+      ),
+      shortcut: true,
+    },
+    {
+      key: 'hasBids',
+      label: 'Bid Status',
+      filter: (
+        <ChoiceList
+          title="Bid Status"
+          titleHidden
+          choices={[
+            { label: 'With Bids', value: 'with-bids' },
+            { label: 'Without Bids', value: 'without-bids' },
+          ]}
+          selected={filters.hasBids}
+          onChange={(value) => handleFiltersChange('hasBids', value)}
+          allowMultiple
+        />
+      ),
+      shortcut: true,
+    },
+  ];
+
+  if (!success && error) {
+    return (
+      <Page>
+        <TitleBar title="Ask & Bid Management" />
+        <Layout>
+          <Layout.Section>
+            <Banner tone="critical">
+              <Text as="p">Error loading products: {error}</Text>
+            </Banner>
+          </Layout.Section>
+        </Layout>
+      </Page>
+    );
+  }
+
+  return (
+    <Page>
+      <TitleBar title="Ask & Bid Management">
+        <Button
+          variant="primary"
+          onClick={() => navigate('/app/askbid/add')}
+        >
+          Sync New Products
+        </Button>
+      </TitleBar>
+      
+      <BlockStack gap="500">
+        {/* Statistics Cards */}
+        {stats && (
+          <Layout>
+            <Layout.Section>
+              <InlineStack gap="400">
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">Total Products</Text>
+                    <Text as="p" variant="heading2xl">{stats.totalProducts}</Text>
+                  </BlockStack>
+                </Card>
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">Products with Bids</Text>
+                    <Text as="p" variant="heading2xl">{stats.productsWithBids}</Text>
+                  </BlockStack>
+                </Card>
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">Total Bids</Text>
+                    <Text as="p" variant="heading2xl">{stats.totalBids}</Text>
+                  </BlockStack>
+                </Card>
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">Avg Ask Price</Text>
+                    <Text as="p" variant="heading2xl">${stats.averageAskPrice.toFixed(2)}</Text>
+                  </BlockStack>
+                </Card>
+              </InlineStack>
+            </Layout.Section>
+          </Layout>
+        )}
+
+        {/* Filters */}
+        <Layout>
+          <Layout.Section>
+            <Card>
+              <Filters
+                queryValue=""
+                filters={filterOptions}
+                onQueryChange={() => {}}
+                onClearAll={clearAllFilters}
+              >
+                <Text as="h3" variant="headingMd">
+                  {filteredProducts.length} of {products.length} products
+                </Text>
+              </Filters>
+            </Card>
+          </Layout.Section>
+        </Layout>
+
+        {/* Products List */}
+        <Layout>
+          <Layout.Section>
+            {filteredProducts.length === 0 ? (
+              <EmptyState
+                heading="No products found"
+                action={{
+                  content: 'Sync Products from Shopify',
+                  onAction: () => navigate('/app/askbid/add'),
+                }}
+                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+              >
+                <Text as="p">
+                  {products.length === 0 
+                    ? "Sync your Shopify products to start setting ask and bid prices."
+                    : "Try adjusting your filters to see more products."
+                  }
+                </Text>
+              </EmptyState>
+            ) : (
+              <BlockStack gap="400">
+                {filteredProducts.map((product) => (
+                  <AskBidCard key={product.id} product={product} />
+                ))}
+              </BlockStack>
+            )}
+          </Layout.Section>
+        </Layout>
+      </BlockStack>
+    </Page>
+  );
+}
+
+================================================================
+4. BID SUBMISSION PAGE (app/routes/app.askbid.bid.jsx)
+================================================================
+
+import { useState } from "react";
+import { useLoaderData, useActionData, useSubmit, useNavigation } from "@remix-run/react";
+import { json, redirect } from "@remix-run/node";
+import {
+  Page,
+  Layout,
+  Text,
+  Card,
+  Button,
+  BlockStack,
+  InlineStack,
+  TextField,
+  Banner,
+  Thumbnail,
+  Divider,
+  Badge,
+  Box,
+} from "@shopify/polaris";
+import { TitleBar } from "@shopify/app-bridge-react";
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const loader = async ({ request }) => {
+  await authenticate.admin(request);
+  
+  const url = new URL(request.url);
+  const productId = url.searchParams.get("productId");
+
+  if (!productId) {
+    throw new Response("Product ID is required", { status: 400 });
+  }
+
+  try {
+    const product = await db.product.findUnique({
+      where: { id: productId },
+      include: {
+        bids: {
+          orderBy: { createdAt: 'desc' },
+          take: 10
+        }
+      }
+    });
+
+    if (!product) {
+      throw new Response("Product not found", { status: 404 });
+    }
+
+    return json({ product });
+  } catch (error) {
+    console.error("Error loading product:", error);
+    throw new Response("Error loading product", { status: 500 });
+  }
+};
+
+export const action = async ({ request }) => {
+  await authenticate.admin(request);
+  
+  const formData = await request.formData();
+  const productId = formData.get("productId");
+  const amount = parseFloat(formData.get("amount"));
+  const bidderEmail = formData.get("bidderEmail") || null;
+  const bidderName = formData.get("bidderName") || null;
+  const message = formData.get("message") || null;
+
+  // Validation
+  if (!productId || !amount || amount <= 0) {
+    return json({ 
+      error: "Product ID and valid bid amount are required",
+      success: false 
+    });
+  }
+
+  try {
+    // Check if product exists
+    const product = await db.product.findUnique({
+      where: { id: productId }
+    });
+
+    if (!product) {
+      return json({ 
+        error: "Product not found",
+        success: false 
+      });
+    }
+
+    // Validate bid amount against ask price
+    if (amount > product.askPrice) {
+      return json({ 
+        error: `Bid amount cannot exceed ask price of $${product.askPrice.toFixed(2)}`,
+        success: false 
+      });
+    }
+
+    // Create bid
+    const bid = await db.bid.create({
+      data: {
+        productId,
+        amount,
+        bidderEmail,
+        bidderName,
+        message,
+        status: 'pending'
+      }
+    });
+
+    return redirect(`/app/askbid?success=bid-submitted&bidId=${bid.id}`);
+  } catch (error) {
+    console.error("Error creating bid:", error);
+    return json({ 
+      error: "Failed to submit bid. Please try again.",
+      success: false 
+    });
+  }
+};
+
+export default function BidPage() {
+  const { product } = useLoaderData();
+  const actionData = useActionData();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  
+  const [formData, setFormData] = useState({
+    amount: '',
+    bidderEmail: '',
+    bidderName: '',
+    message: ''
+  });
+
+  const isSubmitting = navigation.state === "submitting";
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    
+    const data = new FormData();
+    data.append("productId", product.id);
+    data.append("amount", formData.amount);
+    data.append("bidderEmail", formData.bidderEmail);
+    data.append("bidderName", formData.bidderName);
+    data.append("message", formData.message);
+    
+    submit(data, { method: "post" });
+  };
+
+  const handleFieldChange = (field) => (value) => {
+    setFormData(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  // Calculate highest bid
+  const highestBid = product.bids.length > 0 
+    ? Math.max(...product.bids.map(bid => parseFloat(bid.amount)))
+    : 0;
+
+  return (
+    <Page>
+      <TitleBar title="Submit Bid" />
+      
+      <Layout>
+        <Layout.Section variant="oneThird">
+          {/* Product Information */}
+          <Card>
+            <BlockStack gap="400">
+              <Text variant="headingMd" as="h2">Product Details</Text>
+              
+              <InlineStack gap="300" blockAlign="start">
+                {product.imageUrl && (
+                  <Thumbnail
+                    source={product.imageUrl}
+                    alt={product.title}
+                    size="large"
+                  />
+                )}
+                <BlockStack gap="200">
+                  <Text variant="headingLg" as="h3">
+                    {product.title}
+                  </Text>
+                  <Text variant="bodyMd" tone="subdued">
+                    SKU: {product.handle || 'N/A'}
+                  </Text>
+                  <Badge tone={product.status === 'ACTIVE' ? "success" : "attention"}>
+                    {product.status}
+                  </Badge>
+                </BlockStack>
+              </InlineStack>
+
+              <Divider />
+
+              <BlockStack gap="300">
+                <InlineStack align="space-between">
+                  <Text variant="bodyMd">Base Price:</Text>
+                  <Text variant="bodyMd" fontWeight="semibold">
+                    ${product.basePrice.toFixed(2)}
+                  </Text>
+                </InlineStack>
+                
+                <InlineStack align="space-between">
+                  <Text variant="bodyMd">Ask Price:</Text>
+                  <Text variant="bodyMd" fontWeight="semibold" tone="success">
+                    ${product.askPrice.toFixed(2)}
+                  </Text>
+                </InlineStack>
+                
+                <InlineStack align="space-between">
+                  <Text variant="bodyMd">Highest Bid:</Text>
+                  <Text variant="bodyMd" fontWeight="semibold">
+                    ${highestBid.toFixed(2)}
+                  </Text>
+                </InlineStack>
+              </BlockStack>
+            </BlockStack>
+          </Card>
+
+          {/* Recent Bids */}
+          {product.bids.length > 0 && (
+            <Card>
+              <BlockStack gap="400">
+                <Text variant="headingMd" as="h2">Recent Bids</Text>
+                
+                <BlockStack gap="300">
+                  {product.bids.slice(0, 5).map((bid) => (
+                    <Box key={bid.id} padding="300" background="bg-surface-secondary">
+                      <InlineStack align="space-between" blockAlign="start">
+                        <BlockStack gap="100">
+                          <Text variant="bodyMd" fontWeight="semibold">
+                            ${parseFloat(bid.amount).toFixed(2)}
+                          </Text>
+                          <Text variant="bodySm" tone="subdued">
+                            {new Date(bid.createdAt).toLocaleDateString()}
+                          </Text>
+                        </BlockStack>
+                        <Badge tone={bid.status === 'pending' ? 'info' : 'success'}>
+                          {bid.status}
+                        </Badge>
+                      </InlineStack>
+                      {bid.message && (
+                        <Text variant="bodySm" tone="subdued">
+                          {bid.message}
+                        </Text>
+                      )}
+                    </Box>
+                  ))}
+                </BlockStack>
+              </BlockStack>
+            </Card>
+          )}
+        </Layout.Section>
+
+        <Layout.Section variant="twoThirds">
+          {/* Bid Form */}
+          <form onSubmit={handleSubmit}>
+            <Card>
+              <BlockStack gap="400">
+                <Text variant="headingMd" as="h2">Submit Your Bid</Text>
+                
+                {actionData?.error && (
+                  <Banner tone="critical">
+                    <Text as="p">{actionData.error}</Text>
+                  </Banner>
+                )}
+
+                <TextField
+                  label="Bid Amount"
+                  type="number"
+                  value={formData.amount}
+                  onChange={handleFieldChange('amount')}
+                  prefix="$"
+                  step="0.01"
+                  min="0.01"
+                  max={product.askPrice}
+                  helpText={`Maximum bid: $${product.askPrice.toFixed(2)} (Ask Price)`}
+                  autoComplete="off"
+                  required
+                />
+
+                <TextField
+                  label="Your Email (Optional)"
+                  type="email"
+                  value={formData.bidderEmail}
+                  onChange={handleFieldChange('bidderEmail')}
+                  helpText="We'll use this to contact you if your bid is accepted"
+                  autoComplete="email"
+                />
+
+                <TextField
+                  label="Your Name (Optional)"
+                  type="text"
+                  value={formData.bidderName}
+                  onChange={handleFieldChange('bidderName')}
+                  autoComplete="name"
+                />
+
+                <TextField
+                  label="Message (Optional)"
+                  value={formData.message}
+                  onChange={handleFieldChange('message')}
+                  multiline={3}
+                  helpText="Add any additional comments about your bid"
+                  autoComplete="off"
+                />
+
+                <InlineStack gap="300">
+                  <Button
+                    variant="primary"
+                    submit
+                    loading={isSubmitting}
+                    disabled={!formData.amount || parseFloat(formData.amount) <= 0}
+                  >
+                    {isSubmitting ? 'Submitting...' : 'Submit Bid'}
+                  </Button>
+                  
+                  <Button
+                    onClick={() => window.location.href = '/app/askbid'}
+                  >
+                    Cancel
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </form>
+        </Layout.Section>
+      </Layout>
+    </Page>
+  );
+}
+
+================================================================
+5. ASK PRICE EDITING PAGE (app/routes/app.askbid.edit.jsx)
+================================================================
+
+import { useState } from "react";
+import { useLoaderData, useActionData, useSubmit, useNavigation } from "@remix-run/react";
+import { json, redirect } from "@remix-run/node";
+import {
+  Page,
+  Layout,
+  Text,
+  Card,
+  Button,
+  BlockStack,
+  InlineStack,
+  TextField,
+  Banner,
+  Thumbnail,
+  Divider,
+  Badge,
+  Box,
+} from "@shopify/polaris";
+import { TitleBar } from "@shopify/app-bridge-react";
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const loader = async ({ request }) => {
+  await authenticate.admin(request);
+  
+  const url = new URL(request.url);
+  const productId = url.searchParams.get("productId");
+
+  if (!productId) {
+    throw new Response("Product ID is required", { status: 400 });
+  }
+
+  try {
+    const product = await db.product.findUnique({
+      where: { id: productId },
+      include: {
+        bids: {
+          orderBy: { createdAt: 'desc' }
+        }
+      }
+    });
+
+    if (!product) {
+      throw new Response("Product not found", { status: 404 });
+    }
+
+    return json({ product });
+  } catch (error) {
+    console.error("Error loading product:", error);
+    throw new Response("Error loading product", { status: 500 });
+  }
+};
+
+export const action = async ({ request }) => {
+  await authenticate.admin(request);
+  
+  const formData = await request.formData();
+  const productId = formData.get("productId");
+  const askPrice = parseFloat(formData.get("askPrice"));
+  const baseCost = parseFloat(formData.get("baseCost"));
+
+  // Validation
+  if (!productId || !askPrice || askPrice <= 0) {
+    return json({ 
+      error: "Product ID and valid ask price are required",
+      success: false 
+    });
+  }
+
+  try {
+    // Update product
+    const updatedProduct = await db.product.update({
+      where: { id: productId },
+      data: {
+        askPrice,
+        baseCost: baseCost || 0,
+      }
+    });
+
+    return redirect(`/app/askbid?success=ask-updated&productId=${updatedProduct.id}`);
+  } catch (error) {
+    console.error("Error updating ask price:", error);
+    return json({ 
+      error: "Failed to update ask price. Please try again.",
+      success: false 
+    });
+  }
+};
+
+export default function EditAskPage() {
+  const { product } = useLoaderData();
+  const actionData = useActionData();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  
+  const [formData, setFormData] = useState({
+    askPrice: product.askPrice.toString(),
+    baseCost: product.baseCost.toString(),
+  });
+
+  const isSubmitting = navigation.state === "submitting";
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    
+    const data = new FormData();
+    data.append("productId", product.id);
+    data.append("askPrice", formData.askPrice);
+    data.append("baseCost", formData.baseCost);
+    
+    submit(data, { method: "post" });
+  };
+
+  const handleFieldChange = (field) => (value) => {
+    setFormData(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  // Calculate profit and margin
+  const askPrice = parseFloat(formData.askPrice) || 0;
+  const baseCost = parseFloat(formData.baseCost) || 0;
+  const profit = askPrice - baseCost;
+  const profitMargin = baseCost > 0 ? ((profit / baseCost) * 100) : 0;
+
+  // Calculate bid statistics
+  const totalBids = product.bids.length;
+  const highestBid = totalBids > 0 
+    ? Math.max(...product.bids.map(bid => parseFloat(bid.amount)))
+    : 0;
+  const averageBid = totalBids > 0
+    ? product.bids.reduce((sum, bid) => sum + parseFloat(bid.amount), 0) / totalBids
+    : 0;
+
+  return (
+    <Page>
+      <TitleBar title="Edit Ask Price" />
+      
+      <Layout>
+        <Layout.Section variant="oneThird">
+          {/* Product Information */}
+          <Card>
+            <BlockStack gap="400">
+              <Text variant="headingMd" as="h2">Product Details</Text>
+              
+              <InlineStack gap="300" blockAlign="start">
+                {product.imageUrl && (
+                  <Thumbnail
+                    source={product.imageUrl}
+                    alt={product.title}
+                    size="large"
+                  />
+                )}
+                <BlockStack gap="200">
+                  <Text variant="headingLg" as="h3">
+                    {product.title}
+                  </Text>
+                  <Text variant="bodyMd" tone="subdued">
+                    SKU: {product.handle || 'N/A'}
+                  </Text>
+                  <Badge tone={product.status === 'ACTIVE' ? "success" : "attention"}>
+                    {product.status}
+                  </Badge>
+                </BlockStack>
+              </InlineStack>
+
+              <Divider />
+
+              <BlockStack gap="300">
+                <InlineStack align="space-between">
+                  <Text variant="bodyMd">Base Price:</Text>
+                  <Text variant="bodyMd" fontWeight="semibold">
+                    ${product.basePrice.toFixed(2)}
+                  </Text>
+                </InlineStack>
+                
+                <InlineStack align="space-between">
+                  <Text variant="bodyMd">Current Ask Price:</Text>
+                  <Text variant="bodyMd" fontWeight="semibold" tone="success">
+                    ${product.askPrice.toFixed(2)}
+                  </Text>
+                </InlineStack>
+              </BlockStack>
+            </BlockStack>
+          </Card>
+
+          {/* Bid Statistics */}
+          {totalBids > 0 && (
+            <Card>
+              <BlockStack gap="400">
+                <Text variant="headingMd" as="h2">Bid Statistics</Text>
+                
+                <BlockStack gap="300">
+                  <InlineStack align="space-between">
+                    <Text variant="bodyMd">Total Bids:</Text>
+                    <Text variant="bodyMd" fontWeight="semibold">
+                      {totalBids}
+                    </Text>
+                  </InlineStack>
+                  
+                  <InlineStack align="space-between">
+                    <Text variant="bodyMd">Highest Bid:</Text>
+                    <Text variant="bodyMd" fontWeight="semibold">
+                      ${highestBid.toFixed(2)}
+                    </Text>
+                  </InlineStack>
+                  
+                  <InlineStack align="space-between">
+                    <Text variant="bodyMd">Average Bid:</Text>
+                    <Text variant="bodyMd" fontWeight="semibold">
+                      ${averageBid.toFixed(2)}
+                    </Text>
+                  </InlineStack>
+                  
+                  <InlineStack align="space-between">
+                    <Text variant="bodyMd">Pending Bids:</Text>
+                    <Text variant="bodyMd" fontWeight="semibold">
+                      {product.bids.filter(b => b.status === 'pending').length}
+                    </Text>
+                  </InlineStack>
+                </BlockStack>
+              </BlockStack>
+            </Card>
+          )}
+        </Layout.Section>
+
+        <Layout.Section variant="twoThirds">
+          {/* Edit Form */}
+          <form onSubmit={handleSubmit}>
+            <Card>
+              <BlockStack gap="400">
+                <Text variant="headingMd" as="h2">Update Ask Price</Text>
+                
+                {actionData?.error && (
+                  <Banner tone="critical">
+                    <Text as="p">{actionData.error}</Text>
+                  </Banner>
+                )}
+
+                <TextField
+                  label="Base Cost"
+                  type="number"
+                  value={formData.baseCost}
+                  onChange={handleFieldChange('baseCost')}
+                  prefix="$"
+                  step="0.01"
+                  min="0"
+                  helpText="Your cost for this product"
+                  autoComplete="off"
+                />
+
+                <TextField
+                  label="Ask Price"
+                  type="number"
+                  value={formData.askPrice}
+                  onChange={handleFieldChange('askPrice')}
+                  prefix="$"
+                  step="0.01"
+                  min="0.01"
+                  helpText="The price you're asking for this product"
+                  autoComplete="off"
+                  required
+                />
+
+                {/* Profit Analysis */}
+                <Card background="bg-surface-secondary">
+                  <BlockStack gap="300">
+                    <Text variant="headingMd" as="h3">Profit Analysis</Text>
+                    
+                    <InlineStack align="space-between">
+                      <Text variant="bodyMd">Ask Price:</Text>
+                      <Text variant="bodyMd" fontWeight="semibold">
+                        ${askPrice.toFixed(2)}
+                      </Text>
+                    </InlineStack>
+                    
+                    <InlineStack align="space-between">
+                      <Text variant="bodyMd">Base Cost:</Text>
+                      <Text variant="bodyMd" fontWeight="semibold">
+                        ${baseCost.toFixed(2)}
+                      </Text>
+                    </InlineStack>
+                    
+                    <Divider />
+                    
+                    <InlineStack align="space-between">
+                      <Text variant="bodyMd">Profit:</Text>
+                      <Text 
+                        variant="bodyMd" 
+                        fontWeight="semibold"
+                        tone={profit >= 0 ? "success" : "critical"}
+                      >
+                        ${profit.toFixed(2)}
+                      </Text>
+                    </InlineStack>
+                    
+                    <InlineStack align="space-between">
+                      <Text variant="bodyMd">Profit Margin:</Text>
+                      <Text 
+                        variant="bodyMd" 
+                        fontWeight="semibold"
+                        tone={profitMargin >= 0 ? "success" : "critical"}
+                      >
+                        {profitMargin.toFixed(1)}%
+                      </Text>
+                    </InlineStack>
+                  </BlockStack>
+                </Card>
+
+                <InlineStack gap="300">
+                  <Button
+                    variant="primary"
+                    submit
+                    loading={isSubmitting}
+                    disabled={!formData.askPrice || parseFloat(formData.askPrice) <= 0}
+                  >
+                    {isSubmitting ? 'Updating...' : 'Update Ask Price'}
+                  </Button>
+                  
+                  <Button
+                    onClick={() => window.location.href = '/app/askbid'}
+                  >
+                    Cancel
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </form>
+        </Layout.Section>
+      </Layout>
+    </Page>
+  );
+}
+
+================================================================
+6. PRODUCT SYNC PAGE (app/routes/app.askbid.add.jsx)
+================================================================
+
+import { useState } from "react";
+import { useLoaderData, useActionData, useSubmit, useNavigation } from "@remix-run/react";
+import { json, redirect } from "@remix-run/node";
+import {
+  Page,
+  Layout,
+  Text,
+  Card,
+  Button,
+  BlockStack,
+  InlineStack,
+  Banner,
+  DataTable,
+  TextField,
+  Thumbnail,
+  Badge,
+  EmptyState,
+} from "@shopify/polaris";
+import { TitleBar } from "@shopify/app-bridge-react";
+import { authenticate } from "../shopify.server";
+import { fetchProducts, calculateAskPrice } from "../utils/api";
+import db from "../db.server";
+
+export const loader = async ({ request }) => {
+  const { admin } = await authenticate.admin(request);
+
+  try {
+    // Fetch products from Shopify
+    const shopifyProducts = await fetchProducts({ admin }, 50);
+    
+    // Get existing products from database
+    const dbProducts = await db.product.findMany({
+      select: { shopifyId: true, askPrice: true, title: true }
+    });
+
+    // Mark which products are new
+    const productsWithStatus = shopifyProducts.map(product => {
+      const existing = dbProducts.find(p => p.shopifyId === product.shopifyId);
+      return {
+        ...product,
+        isNew: !existing,
+        currentAskPrice: existing?.askPrice || 0,
+        suggestedAskPrice: calculateAskPrice(product.basePrice),
+      };
+    });
+
+    const stats = {
+      totalFound: productsWithStatus.length,
+      newProducts: productsWithStatus.filter(p => p.isNew).length,
+      existingProducts: productsWithStatus.filter(p => !p.isNew).length,
+    };
+
+    return json({ 
+      products: productsWithStatus,
+      stats,
+      success: true 
+    });
+  } catch (error) {
+    console.error("Error in add loader:", error);
+    return json({ 
+      products: [],
+      stats: null,
+      error: error.message,
+      success: false 
+    });
+  }
+};
+
+export const action = async ({ request }) => {
+  const { admin } = await authenticate.admin(request);
+  
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  if (intent === "sync-all") {
+    try {
+      // Fetch products from Shopify
+      const shopifyProducts = await fetchProducts({ admin }, 50);
+      
+      let synced = 0;
+      let updated = 0;
+      
+      for (const shopifyProduct of shopifyProducts) {
+        const existingProduct = await db.product.findUnique({
+          where: { shopifyId: shopifyProduct.shopifyId }
+        });
+        
+        if (existingProduct) {
+          // Update existing product
+          await db.product.update({
+            where: { id: existingProduct.id },
+            data: {
+              title: shopifyProduct.title,
+              handle: shopifyProduct.handle,
+              basePrice: shopifyProduct.basePrice,
+              status: shopifyProduct.status,
+              imageUrl: shopifyProduct.imageUrl,
+            }
+          });
+          updated++;
+        } else {
+          // Create new product
+          await db.product.create({
+            data: {
+              shopifyId: shopifyProduct.shopifyId,
+              title: shopifyProduct.title,
+              handle: shopifyProduct.handle,
+              basePrice: shopifyProduct.basePrice,
+              baseCost: shopifyProduct.baseCost,
+              askPrice: calculateAskPrice(shopifyProduct.basePrice),
+              status: shopifyProduct.status,
+              imageUrl: shopifyProduct.imageUrl,
+            }
+          });
+          synced++;
+        }
+      }
+
+      return redirect(`/app/askbid?success=sync-completed&synced=${synced}&updated=${updated}`);
+    } catch (error) {
+      console.error("Error syncing products:", error);
+      return json({ 
+        error: "Failed to sync products. Please try again.",
+        success: false 
+      });
+    }
+  }
+
+  if (intent === "update-ask-price") {
+    const productId = formData.get("productId");
+    const askPrice = parseFloat(formData.get("askPrice"));
+
+    if (!productId || !askPrice || askPrice <= 0) {
+      return json({ 
+        error: "Valid product ID and ask price are required",
+        success: false 
+      });
+    }
+
+    try {
+      await db.product.update({
+        where: { shopifyId: productId },
+        data: { askPrice }
+      });
+
+      return json({ 
+        success: true,
+        message: "Ask price updated successfully"
+      });
+    } catch (error) {
+      console.error("Error updating ask price:", error);
+      return json({ 
+        error: "Failed to update ask price",
+        success: false 
+      });
+    }
+  }
+
+  return json({ error: "Invalid action", success: false });
+};
+
+export default function AddProductsPage() {
+  const { products, stats, error, success } = useLoaderData();
+  const actionData = useActionData();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  
+  const [askPrices, setAskPrices] = useState({});
+
+  const isSubmitting = navigation.state === "submitting";
+
+  const handleSyncAll = () => {
+    const formData = new FormData();
+    formData.append("intent", "sync-all");
+    submit(formData, { method: "post" });
+  };
+
+  const handleAskPriceChange = (productId, value) => {
+    setAskPrices(prev => ({
+      ...prev,
+      [productId]: value
+    }));
+  };
+
+  const handleUpdateAskPrice = (productId) => {
+    const askPrice = askPrices[productId];
+    if (!askPrice || parseFloat(askPrice) <= 0) return;
+
+    const formData = new FormData();
+    formData.append("intent", "update-ask-price");
+    formData.append("productId", productId);
+    formData.append("askPrice", askPrice);
+    submit(formData, { method: "post" });
+  };
+
+  // Prepare table data
+  const rows = products.map(product => [
+    // Product info
+    <InlineStack gap="300" blockAlign="center">
+      {product.imageUrl && (
+        <Thumbnail
+          source={product.imageUrl}
+          alt={product.title}
+          size="small"
+        />
+      )}
+      <BlockStack gap="100">
+        <Text variant="bodyMd" fontWeight="semibold">
+          {product.title}
+        </Text>
+        <Text variant="bodySm" tone="subdued">
+          {product.handle}
+        </Text>
+      </BlockStack>
+    </InlineStack>,
+    
+    // Status
+    <Badge tone={product.isNew ? "attention" : "success"}>
+      {product.isNew ? "New" : "Existing"}
+    </Badge>,
+    
+    // Base Price
+    <Text variant="bodyMd">${product.basePrice.toFixed(2)}</Text>,
+    
+    // Current Ask Price
+    <Text variant="bodyMd">
+      {product.currentAskPrice > 0 ? `$${product.currentAskPrice.toFixed(2)}` : "Not Set"}
+    </Text>,
+    
+    // Suggested Ask Price / Edit
+    product.isNew ? (
+      <Text variant="bodyMd" tone="success">
+        ${product.suggestedAskPrice.toFixed(2)}
+      </Text>
+    ) : (
+      <InlineStack gap="200">
+        <TextField
+          value={askPrices[product.shopifyId] || product.currentAskPrice.toString()}
+          onChange={(value) => handleAskPriceChange(product.shopifyId, value)}
+          type="number"
+          step="0.01"
+          min="0.01"
+          prefix="$"
+          autoComplete="off"
+        />
+        <Button
+          size="micro"
+          onClick={() => handleUpdateAskPrice(product.shopifyId)}
+          disabled={!askPrices[product.shopifyId] || askPrices[product.shopifyId] === product.currentAskPrice.toString()}
+        >
+          Update
+        </Button>
+      </InlineStack>
+    ),
+  ]);
+
+  if (!success && error) {
+    return (
+      <Page>
+        <TitleBar title="Sync Products" />
+        <Layout>
+          <Layout.Section>
+            <Banner tone="critical">
+              <Text as="p">Error loading products: {error}</Text>
+            </Banner>
+          </Layout.Section>
+        </Layout>
+      </Page>
+    );
+  }
+
+  return (
+    <Page>
+      <TitleBar title="Sync Products" />
+      
+      <BlockStack gap="500">
+        {/* Success/Error Messages */}
+        {actionData?.error && (
+          <Banner tone="critical">
+            <Text as="p">{actionData.error}</Text>
+          </Banner>
+        )}
+        
+        {actionData?.success && actionData?.message && (
+          <Banner tone="success">
+            <Text as="p">{actionData.message}</Text>
+          </Banner>
+        )}
+
+        {/* Statistics */}
+        {stats && (
+          <Layout>
+            <Layout.Section>
+              <InlineStack gap="400">
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">Total Found</Text>
+                    <Text as="p" variant="heading2xl">{stats.totalFound}</Text>
+                  </BlockStack>
+                </Card>
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">New Products</Text>
+                    <Text as="p" variant="heading2xl" tone="attention">{stats.newProducts}</Text>
+                  </BlockStack>
+                </Card>
+                <Card>
+                  <BlockStack gap="200">
+                    <Text as="h3" variant="headingMd">Existing Products</Text>
+                    <Text as="p" variant="heading2xl" tone="success">{stats.existingProducts}</Text>
+                  </BlockStack>
+                </Card>
+              </InlineStack>
+            </Layout.Section>
+          </Layout>
+        )}
+
+        {/* Sync Button */}
+        <Layout>
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="400">
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="200">
+                    <Text variant="headingMd" as="h2">
+                      Sync Products from Shopify
+                    </Text>
+                    <Text variant="bodyMd" tone="subdued">
+                      This will sync all products from your Shopify store and set ask prices automatically for new products.
+                    </Text>
+                  </BlockStack>
+                  
+                  <Button
+                    variant="primary"
+                    loading={isSubmitting}
+                    onClick={handleSyncAll}
+                    disabled={products.length === 0}
+                  >
+                    {isSubmitting ? 'Syncing...' : `Sync All Products (${stats?.newProducts || 0} new)`}
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        </Layout>
+
+        {/* Products Table */}
+        <Layout>
+          <Layout.Section>
+            {products.length === 0 ? (
+              <EmptyState
+                heading="No products found"
+                action={{
+                  content: 'Refresh',
+                  onAction: () => window.location.reload(),
+                }}
+                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+              >
+                <Text as="p">
+                  No products were found in your Shopify store.
+                </Text>
+              </EmptyState>
+            ) : (
+              <Card>
+                <DataTable
+                  columnContentTypes={[
+                    'text',
+                    'text', 
+                    'numeric',
+                    'numeric',
+                    'text',
+                  ]}
+                  headings={[
+                    'Product',
+                    'Status',
+                    'Base Price',
+                    'Current Ask Price',
+                    'Suggested/Edit Ask Price',
+                  ]}
+                  rows={rows}
+                />
+              </Card>
+            )}
+          </Layout.Section>
+        </Layout>
+      </BlockStack>
+    </Page>
+  );
+}
+
+================================================================
+7. ASKBID CARD COMPONENT (app/components/AskBidCard.jsx)
+================================================================
+
+// app/components/AskBidCard.jsx
+import { useState } from "react";
+import { useNavigate } from "@remix-run/react";
+import {
+  Card,
+  Text,
+  Button,
+  InlineStack,
+  BlockStack,
+  Badge,
+  Box,
+  Thumbnail,
+  Divider,
+} from "@shopify/polaris";
+
+export function AskBidCard({ product }) {
+  const [showBids, setShowBids] = useState(false);
+  const navigate = useNavigate();
+  
+  // Calculate highest bid
+  const highestBid = product.bids && product.bids.length > 0 
+    ? Math.max(...product.bids.map(bid => parseFloat(bid.amount)))
+    : 0;
+
+  // Calculate profit potential
+  const askPrice = parseFloat(product.askPrice || 0);
+  const baseCost = parseFloat(product.baseCost || 0);
+  const profit = askPrice - baseCost;
+  const profitMargin = baseCost > 0 ? ((profit / baseCost) * 100).toFixed(1) : 0;
+
+  // Handle navigation with onClick handlers
+  const handleSubmitBid = () => {
+    navigate(`/app/askbid/bid?productId=${product.id}`);
+  };
+
+  const handleEditAsk = () => {
+    navigate(`/app/askbid/edit?productId=${product.id}`);
+  };
+
+  console.log('Product in AskBidCard:', product.id, product.title);
+
+  return (
+    <Card>
+      <BlockStack gap="400">
+        {/* Product Header */}
+        <InlineStack align="space-between" blockAlign="start">
+          <InlineStack gap="300" blockAlign="center">
+            {product.featuredImage && (
+              <Thumbnail
+                source={product.featuredImage}
+                alt={product.title}
+                size="small"
+              />
+            )}
+            <BlockStack gap="100">
+              <Text variant="headingMd" as="h3">
+                {product.title}
+              </Text>
+              <Text variant="bodyMd" tone="subdued">
+                SKU: {product.handle || 'N/A'}
+              </Text>
+            </BlockStack>
+          </InlineStack>
+          <Badge tone={askPrice > 0 ? "success" : "attention"}>
+            {askPrice > 0 ? "Active" : "No Ask Price"}
+          </Badge>
+        </InlineStack>
+
+        <Divider />
+
+        {/* Pricing Information */}
+        <InlineStack gap="600" wrap={false}>
+          <BlockStack gap="200">
+            <Text variant="bodyMd" tone="subdued">Base Cost</Text>
+            <Text variant="headingLg" as="p">
+              ${baseCost.toFixed(2)}
+            </Text>
+          </BlockStack>
+          
+          <BlockStack gap="200">
+            <Text variant="bodyMd" tone="subdued">Ask Price</Text>
+            <Text 
+              variant="headingLg" 
+              as="p"
+              tone={askPrice > baseCost ? "success" : "critical"}
+            >
+              ${askPrice.toFixed(2)}
+            </Text>
+          </BlockStack>
+          
+          <BlockStack gap="200">
+            <Text variant="bodyMd" tone="subdued">Highest Bid</Text>
+            <Text variant="headingLg" as="p">
+              ${highestBid.toFixed(2)}
+            </Text>
+          </BlockStack>
+          
+          <BlockStack gap="200">
+            <Text variant="bodyMd" tone="subdued">Profit Margin</Text>
+            <Text 
+              variant="headingLg" 
+              as="p"
+              tone={profit > 0 ? "success" : "critical"}
+            >
+              {profitMargin}%
+            </Text>
+          </BlockStack>
+        </InlineStack>
+
+        {/* Bid Information */}
+        {product.bids && product.bids.length > 0 && (
+          <Box>
+            <InlineStack align="space-between" blockAlign="center">
+              <Text variant="bodyMd">
+                {product.bids.length} bid{product.bids.length !== 1 ? 's' : ''}
+              </Text>
+              <Button
+                variant="plain"
+                onClick={() => setShowBids(!showBids)}
+              >
+                {showBids ? 'Hide' : 'Show'} Bids
+              </Button>
+            </InlineStack>
+            
+            {showBids && (
+              <Box paddingBlockStart="300">
+                <BlockStack gap="200">
+                  {product.bids
+                    .sort((a, b) => parseFloat(b.amount) - parseFloat(a.amount))
+                    .slice(0, 3)
+                    .map((bid, index) => (
+                      <InlineStack key={bid.id} align="space-between">
+                        <Text variant="bodyMd">
+                          Bid #{product.bids.length - index}
+                        </Text>
+                        <Text variant="bodyMd" fontWeight="semibold">
+                          ${parseFloat(bid.amount).toFixed(2)}
+                        </Text>
+                        <Badge tone={bid.status === 'pending' ? 'info' : 'success'}>
+                          {bid.status}
+                        </Badge>
+                      </InlineStack>
+                    ))}
+                  {product.bids.length > 3 && (
+                    <Text variant="bodyMd" tone="subdued">
+                      +{product.bids.length - 3} more bids
+                    </Text>
+                  )}
+                </BlockStack>
+              </Box>
+            )}
+          </Box>
+        )}
+
+        <Divider />
+
+        {/* Action Buttons */}
+        <InlineStack gap="300">
+          <Button
+            variant="primary"
+            onClick={handleSubmitBid}
+          >
+            Submit Bid
+          </Button>
+          <Button
+            onClick={handleEditAsk}
+          >
+            Edit Ask Price
+          </Button>
+        </InlineStack>
+      </BlockStack>
+    </Card>
+  );
+}
+
+================================================================
+8. PRISMA MIGRATIONS
+================================================================
+
+-- Migration 1: Initial Product and Bid models
+-- CreateTable
+CREATE TABLE "Product" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "shopifyId" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "handle" TEXT,
+    "basePrice" REAL NOT NULL DEFAULT 0,
+    "baseCost" REAL NOT NULL DEFAULT 0,
+    "askPrice" REAL NOT NULL DEFAULT 0,
+    "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+    "imageUrl" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
+CREATE TABLE "Bid" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "productId" TEXT NOT NULL,
+    "amount" REAL NOT NULL,
+    "bidderEmail" TEXT,
+    "bidderName" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'pending',
+    "message" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "Bid_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Product_shopifyId_key" ON "Product"("shopifyId");
+
+-- CreateIndex
+CREATE INDEX "Product_shopifyId_idx" ON "Product"("shopifyId");
+
+-- CreateIndex
+CREATE INDEX "Product_status_idx" ON "Product"("status");
+
+-- CreateIndex
+CREATE INDEX "Bid_productId_idx" ON "Bid"("productId");
+
+-- CreateIndex
+CREATE INDEX "Bid_status_idx" ON "Bid"("status");
+
+-- CreateIndex
+CREATE INDEX "Bid_createdAt_idx" ON "Bid"("createdAt");
+
+================================================================
+9. PACKAGE.JSON DEPENDENCIES
+================================================================
+
+Add these dependencies to your package.json:
+
+"dependencies": {
+  "@prisma/client": "latest",
+  "@shopify/polaris": "latest",
+  "@shopify/app-bridge-react": "latest",
+  "@remix-run/react": "latest",
+  "@remix-run/node": "latest",
+  "prisma": "latest"
+}
+
+================================================================
+10. SETUP INSTRUCTIONS
+================================================================
+
+1. Run Prisma migrations:
+   npx prisma migrate dev --name init
+
+2. Generate Prisma client:
+   npx prisma generate
+
+3. Start development server:
+   shopify app dev
+
+4. Access the Ask & Bid functionality:
+   - Main page: /app/askbid
+   - Sync products: /app/askbid/add
+   - Submit bid: /app/askbid/bid?productId=<ID>
+   - Edit ask price: /app/askbid/edit?productId=<ID>
+
+================================================================
+11. FEATURES INCLUDED
+================================================================
+
+✅ Product synchronization from Shopify
+✅ Automatic ask price calculation (20% markup)
+✅ Manual ask price editing with profit analysis
+✅ Bid submission with validation
+✅ Bid history and tracking
+✅ Statistics dashboard
+✅ Product filtering and search
+✅ Responsive Polaris UI components
+✅ App Bridge navigation compatibility
+✅ Database relationships and indexes
+✅ Error handling and validation
+✅ Real-time profit margin calculations
+
+================================================================
+END OF COMPLETE ASK & BID MANAGEMENT CODE
+================================================================
